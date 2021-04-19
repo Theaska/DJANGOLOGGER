@@ -1,0 +1,9 @@
+{% extends 'admin/change_list.html' %}
+
+{% block object-tools %}
+  <form action="{% url 'admin:clear_logs' %}" method="post">
+    {% csrf_token %}
+    <input type="submit" value="Clear" />
+  </form>
+    {{ block.super }}
+{% endblock %}

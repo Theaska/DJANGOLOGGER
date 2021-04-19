@@ -1,0 +1,27 @@
+version: '3'
+services:
+  django_logger:
+    build: .
+    entrypoint: >
+      bash -c " python3 /app/django_logger/manage.py collectstatic --noi &&
+                python3 /app/django_logger/manage.py migrate --noi &&
+                python3 /app/django_logger/manage.py runserver 0:80"
+    volumes:
+      - .:/app
+    ports:
+      - "80:80"
+    tty: true
+    depends_on:
+      - postgres
+    tty: true
+    links:
+      - postgres:postgres
+
+  postgres:
+    image: postgres:11-alpine
+    environment:
+      - POSTGRES_PASSWORD=project
+      - POSTGRES_USER=project
+      - POSTGRES_DB=logger
+    ports:
+      - "5432:5432"

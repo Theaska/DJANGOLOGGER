@@ -1,0 +1,2 @@
+class LoggerTextParserError(BaseException):
+    pass
