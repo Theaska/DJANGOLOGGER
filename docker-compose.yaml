@@ -24,4 +24,4 @@ services:
       - POSTGRES_USER=project
       - POSTGRES_DB=logger
     ports:
-      - "5432:5432"
+      - "5332:5432"

@@ -4,7 +4,6 @@ from django.http.response import HttpResponse, HttpResponseRedirect
 from django.urls import path
 from django.urls.base import reverse
 from .models import LoggerFile
-from djongo.admin import ModelAdmin
 
 
 class BaseListFilter(admin.SimpleListFilter):
@@ -27,7 +26,7 @@ class MethodListFilter(BaseListFilter):
 
 
 @admin.register(LoggerFile)
-class LoggerFileAdmin(ModelAdmin):
+class LoggerFileAdmin(admin.ModelAdmin):
     change_list_template = 'logger/admin/admin.html'
     date_hierarchy = 'date'
     list_display = ('date', 'ip_address', 'additional_ip_info', 'method', 'uri')
