@@ -1,17 +1,31 @@
+import asyncio
 import os
 import re
+from typing import Generator, Iterator
 import aiofiles
 import aiohttp
+from django.db import models
 import datetime
 from django.utils import timezone
 from django.conf import settings
+from logger.parser import LoggerTextParser
 import logging
+from asgiref.sync import sync_to_async
 
 
 logger = logging.getLogger(__name__)
+        
+
+def generate_logfile_name() -> str:
+    """
+        Generate name for logfile
+    """
+    return f'log_file_{timezone.now().strftime("%d_%m_%y_%H_%M")}.log'
 
 
 DEFAULT_LOG_PATH = settings.BASE_DIR / 'logs'
+NEW_LINE_SYMBOLS = ('\n', '\r', '\r\n', '\n\r')
+LOGFILE_NAME_GENERATOR = generate_logfile_name
 DEFAULT_LOG_REGEX = re.compile('(\d+\.\d+\.\d+\.\d+)'  # ip address (group 1)
                     '(?:\.(.*)){0,1} ' # additional info for strange addresses (ex. 145.219.89.34.bc.googleusercontent.com) (group 2)
                     '(.*) ' # group 3
@@ -27,92 +41,90 @@ DEFAULT_LOG_REGEX = re.compile('(\d+\.\d+\.\d+\.\d+)'  # ip address (group 1)
                     '\"(.*)\"') # hz (group 13)
 
 
-class ImportLoggerFile(object):
-    """
-        Async importer loggers from url. Example of running:
 
-        import asyncio
+class ImportLogs(object):
+    async def import_from_file(self, filename: str, **import_kwargs):
+        log_iterator = self._read_line_from_file(filename)
+        await self.__import(log_iterator=log_iterator, **import_kwargs)
 
-        async def run():
-            importer_loggs = ImportLoggerFile('http://www.almhuette-raith.at/apache-log/access.log')
-            importer_loggs_error = ImportLoggerFile('http://www.almhuette-raith.at/apache-log/error.log')
-            await asyncio.gather(
-                importer_loggs.import_from_url(),
-                importer_loggs_error.import_from_url(),
-            )
+    async def import_from_url(self, url: str, **import_kwargs):
+        log_iterator = self._read_line_from_url(url)
+        await self.__import(log_iterator=log_iterator, **import_kwargs)
 
-        def main():
-            asyncio.run(self.run())
+    async def __import(self, log_iterator: Iterator[bytearray], save=False, output_model: models.Model = None, chunk_size: int = 5, filepath: str=None):
+        chunk = []
+        parser = LoggerTextParser(regex=DEFAULT_LOG_REGEX)
+        output_file = await self.get_file(filepath) if save else None
 
-        main()
-    """
+        async for line in log_iterator:
 
-    def __init__(self, url: str):
-        self.url = url
-        self._text = None
+            if not line or line in NEW_LINE_SYMBOLS:
+                continue
 
-    async def import_logs(self):
+            parsed_line = parser.parse(line=line)
+            if not parsed_line:
+                continue
+
+            if save:
+                output_file.write(parsed_line)
+            
+            log_dict = pack_apache_logline(parsed_line)
+
+            # create chunk
+            if output_model and log_dict:
+                if len(chunk) >= chunk_size:
+                    await self._write_to_db(output_model, chunk=chunk)
+                    chunk = []
+                model_obj = self._create_output_object(output_model, **log_dict)
+                chunk.append(model_obj)
+
+        # check if chunk is not empty
+        if output_model and chunk:
+            await self._write_to_db(output_model, chunk=chunk)
+
+        if output_file:
+            output_file.close()
+
+    def _create_output_object(self, output_model: models.Model, **info):
+        """ Just create class model object """
+        try:
+            return output_model(**info)
+        except (ValueError, AttributeError) as exc:
+            logger.warning('Can not create models objects. {exc}'.format(exc))
+
+    async def _write_to_db(self, output_model: models.Model, chunk: tuple):
+        """ Create DB entities with builk_crate asynchronously """
+        try:
+            await sync_to_async(output_model.objects.bulk_create)(chunk)
+        except (ValueError, AttributeError) as exc:
+            logger.warning('Can not create models objects. {exc}'.format(exc))
+    
+    async def get_file(self, filepath: str = None):
+        """ Get or create file from filepath or check if logs dir exists.
+        If doesn't, then create dir and return aiofiles.files
         """
-            Import logger file text with aiohttp.
-        """
-        async with aiohttp.ClientSession() as session:
-            async with session.get(self.url) as response:
-                if not response.status == 200:
-                    raise ValueError('Can not get log text. Status code of response {}'.format(response.status))
+        if not filepath:
+            if not os.path.exists(DEFAULT_LOG_PATH):
+                os.mkdir(DEFAULT_LOG_PATH)
+            filepath = os.path.join(DEFAULT_LOG_PATH, LOGFILE_NAME_GENERATOR())
+        return await aiofiles.open(filepath, 'a+')
 
-                content_type = response.headers.get('Content-Type')
-                if not content_type.startswith('text/plain;'):
-                    raise ValueError('Wait content-type "text/plain", but got {}'.format(content_type))
+    async def _read_line_from_url(self, url)-> Iterator[bytearray]:
+        """  Yield line bytes from content """
+        async with aiohttp.request('get', url) as response:
+            response.raise_for_status()
+
+            if not response.headers.get('Content-Type').startswith('text/plain;'):
+                raise ValueError('Wait content-type "text/plain", but got {}'.format(response.headers.get('Content-Type')))
+            
+            async for line in response.content:
+                yield line.decode()
+    
+    async def _read_line_from_file(self, filename: str) -> Iterator[str]:
+        async with aiofiles.open(filename) as file:
+            async for line in file:
+                yield line
                 
-                return await response.text()
-                
-        
-
-def generate_logfile_name() -> str:
-    """
-        Generate name for logfile
-    """
-    return f'log_file_{timezone.now().strftime("%d_%m_%y_%H_%M")}.log'
-
-
-LOGFILE_NAME_GENERATOR = generate_logfile_name
-
-
-class LoggerTextParser:
-    """
-        Class for parsing log text or saving it as a file.
-    """
-    regex = DEFAULT_LOG_REGEX
-
-    def set_regex(self, regex: str = None):
-        """
-            Set regular expression for parsing logger file
-        """
-        if regex is None:
-            self.regex = DEFAULT_LOG_REGEX
-        else:
-            self.regex = re.compile(regex)
-
-    def parse(self, text: str):
-        for line in text.strip().splitlines():
-            match = self.regex.match(line)
-            if not match:
-                logger.warning('Line does not match regex: ', line)
-                inp = input('Print "c" to continue: ')
-                if inp.lower() == 'c':
-                    continue
-                else:
-                    return
-            yield self.regex.findall(line)[0]
-
-    async def save(self, text: str, filename: str = LOGFILE_NAME_GENERATOR(), path: str = DEFAULT_LOG_PATH):
-        """
-            Save logger file asynchronously.
-        """
-        path = os.path.join(path, filename)
-        async with aiofiles.open(path, 'a+') as file:
-            await file.write(text)
-
 
 
 def pack_apache_logline(parsed_line_tuple: tuple) -> dict:
@@ -133,4 +145,5 @@ def pack_apache_logline(parsed_line_tuple: tuple) -> dict:
             'user_agent': parsed_line_tuple[11]
         }
     except Exception as exc:
-        logger.exception(str(exc), parsed_line_tuple)
+        logger.warning(str(exc), parsed_line_tuple)
+        return {}
